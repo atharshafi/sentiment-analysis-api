@@ -1,0 +1,36 @@
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.Python
+
+# Model cache (huge, don't commit)
+.cache/
+~/.cache/huggingface/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Node (for frontend later)
+node_modules/
+npm-debug.log
+
+# OS
+.DS_Store
+Thumbs.db
