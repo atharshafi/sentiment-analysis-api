@@ -774,14 +774,6 @@ This project is open source under the MIT License. See LICENSE file for details.
 
 ---
 
-## 📞 Contact & Social
-
-- **GitHub:** https://github.com/YOUR_USERNAME
-- **LinkedIn:** https://linkedin.com/in/YOUR_PROFILE
-- **Portfolio:** https://yourportfolio.com
-
----
-
 ## 🚀 Next Steps
 
 **Ready to move forward?**
@@ -799,9 +791,9 @@ You'll learn:
 
 ---
 
-**Last Updated:** January 2024  
+**Last Updated:** 20th June 2026  
 **Version:** 1.0 (STEP 1-2 Complete)  
-**Maintainer:** Your Name (athar.shafi)
+**Maintainer:** Athar Shafi
 
 ---
 
