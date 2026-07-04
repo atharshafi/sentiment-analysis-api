@@ -1,18 +1,17 @@
 """
 Sentiment Analysis FastAPI Server
-Uses Hugging Face Inference API (no local model needed!)
-Memory usage: ~50MB (vs 1.5GB with local model)
+Uses Hugging Face Inference API with synchronous requests
 """
 
 import logging
 import time
 import os
-import httpx
-from contextlib import asynccontextmanager
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
+from contextlib import asynccontextmanager
 
 # ============================================================================
 # LOGGING
@@ -24,22 +23,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# HUGGING FACE API CONFIG
+# CONFIG
 # ============================================================================
 HF_API_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 
 # ============================================================================
-# PYDANTIC MODELS
+# MODELS
 # ============================================================================
 class AnalyzeRequest(BaseModel):
-    text: str = Field(
-        ...,
-        min_length=1,
-        max_length=10000,
-        description="Text to analyze for sentiment"
-    )
-    max_length: Optional[int] = Field(512, description="Max tokens")
+    text: str = Field(..., min_length=1, max_length=10000)
+    max_length: Optional[int] = Field(512)
 
 
 class AnalyzeResponse(BaseModel):
@@ -62,10 +56,20 @@ class HealthResponse(BaseModel):
 async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("SERVER STARTUP")
-    logger.info("=" * 60)
-    logger.info("Using Hugging Face Inference API")
-    logger.info(f"Model: distilbert-base-uncased-finetuned-sst-2-english")
-    logger.info(f"HF Token configured: {'YES' if HF_API_TOKEN else 'NO (using free tier)'}")
+    logger.info(f"HF Token configured: {'YES' if HF_API_TOKEN else 'NO'}")
+    logger.info("Testing connection to Hugging Face API...")
+
+    try:
+        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
+        response = requests.get(
+            "https://huggingface.co",
+            headers=headers,
+            timeout=10
+        )
+        logger.info(f"✅ HF connection test: {response.status_code}")
+    except Exception as e:
+        logger.warning(f"⚠️ HF connection test failed: {e}")
+
     logger.info("✅ Server is ready to receive requests")
     logger.info("=" * 60)
     yield
@@ -73,7 +77,7 @@ async def lifespan(app: FastAPI):
 
 
 # ============================================================================
-# FASTAPI APP
+# APP
 # ============================================================================
 app = FastAPI(
     title="Sentiment Analysis API",
@@ -93,15 +97,28 @@ app.add_middleware(
     allow_headers=["*"],
     max_age=600,
 )
-
-logger.info("✅ CORS configured for React frontend")
+logger.info("✅ CORS configured")
 
 
 # ============================================================================
 # ROUTES
 # ============================================================================
+@app.get("/")
+def root():
+    return {
+        "name": "Sentiment Analysis API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "analyze": "/analyze (POST)",
+            "docs": "/docs"
+        }
+    }
+
+
 @app.get("/health", response_model=HealthResponse)
-async def health_check():
+def health_check():
     return HealthResponse(
         status="healthy",
         model_loaded=True,
@@ -110,8 +127,8 @@ async def health_check():
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze_sentiment(request: AnalyzeRequest):
-    # Validate input
+def analyze_sentiment(request: AnalyzeRequest):
+    # Validate
     text = request.text.strip()
 
     if not text:
@@ -131,85 +148,81 @@ async def analyze_sentiment(request: AnalyzeRequest):
     try:
         start_time = time.time()
 
-        # Call Hugging Face Inference API
-        headers = {}
+        # Build headers
+        headers = {
+            "Content-Type": "application/json"
+        }
         if HF_API_TOKEN:
             headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                HF_API_URL,
-                headers=headers,
-                json={"inputs": text}
-            )
+        # Call HF API using synchronous requests
+        response = requests.post(
+            HF_API_URL,
+            headers=headers,
+            json={"inputs": text},
+            timeout=30
+        )
 
         inference_time = time.time() - start_time
 
-        # Handle model loading (HF API returns 503 when warming up)
+        logger.info(f"HF API status: {response.status_code}")
+
+        # Handle 503 (model loading)
         if response.status_code == 503:
             raise HTTPException(
                 status_code=503,
-                detail="Model is warming up on Hugging Face servers. Please try again in 20 seconds."
+                detail="Model is warming up. Please try again in 20 seconds."
             )
 
+        # Handle errors
         if response.status_code != 200:
+            logger.error(f"HF API error: {response.text}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Hugging Face API error: {response.text}"
+                detail=f"Hugging Face API error: {response.status_code}"
             )
 
         # Parse response
-        # HF returns: [[{"label": "POSITIVE", "score": 0.9987}, {...}]]
+        # HF returns: [[{"label": "POSITIVE", "score": 0.9987}, ...]]
         result = response.json()
+        logger.info(f"HF API response: {result}")
+
         predictions = result[0]
-
-        # Get the highest confidence prediction
-        best_prediction = max(predictions, key=lambda x: x["score"])
-
-        sentiment = best_prediction["label"]
-        confidence = best_prediction["score"]
+        best = max(predictions, key=lambda x: x["score"])
 
         logger.info(
-            f"✅ Result: {sentiment} | "
-            f"Confidence: {confidence:.4f} | "
-            f"Time: {inference_time*1000:.2f}ms"
+            f"✅ {best['label']} | "
+            f"{best['score']:.4f} | "
+            f"{inference_time*1000:.2f}ms"
         )
 
         return AnalyzeResponse(
             text=text,
-            sentiment=sentiment,
-            confidence=confidence,
+            sentiment=best["label"],
+            confidence=best["score"],
             inference_time_ms=round(inference_time * 1000, 2)
         )
 
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Request to Hugging Face API timed out. Please try again."
-        )
     except HTTPException:
         raise
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot connect to Hugging Face API. Please try again."
+        )
+    except requests.exceptions.Timeout:
+        logger.error("Request timed out")
+        raise HTTPException(
+            status_code=504,
+            detail="Request timed out. Please try again."
+        )
     except Exception as e:
         logger.error(f"❌ Error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Analysis failed: {str(e)}"
         )
-
-
-@app.get("/")
-async def root():
-    return {
-        "name": "Sentiment Analysis API",
-        "version": "1.0.0",
-        "description": "Analyze sentiment using Hugging Face Inference API",
-        "model": "distilbert-base-uncased-finetuned-sst-2-english",
-        "endpoints": {
-            "health": "/health",
-            "analyze": "/analyze (POST)",
-            "docs": "/docs"
-        }
-    }
 
 
 # ============================================================================
