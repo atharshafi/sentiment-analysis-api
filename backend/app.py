@@ -226,19 +226,22 @@ app = FastAPI(
 # Browser blocks cross-origin requests for security
 # We need to explicitly allow React to call this API
 
+# CORS Configuration - MUST be first middleware
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",      # Development: React on localhost
-        "http://localhost:5173",      # Vite dev server
-        "https://vercel.app",         # Production: React on Vercel
-        "https://*.vercel.app",       # Any Vercel subdomain
+        "http://localhost:3000",
+        "http://localhost:5174",
+        "https://vercel.app",
+        "https://*.vercel.app",
     ],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # ← Explicitly include OPTIONS
+    allow_headers=["*"],
+    max_age=600,  # ← Cache preflight for 10 minutes
 )
-
 logger.info("✅ CORS configured for React frontend")
 
 # ============================================================================
