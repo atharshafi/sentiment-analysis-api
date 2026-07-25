@@ -1,17 +1,17 @@
 """
 Sentiment Analysis FastAPI Server
-Uses Hugging Face Free Inference API
+Uses VADER - runs locally, no external API needed!
+Perfect for Render free tier (no memory/DNS issues)
 """
 
 import logging
 import time
-import os
-import requests
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
-from contextlib import asynccontextmanager
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # ============================================================================
 # LOGGING
@@ -23,11 +23,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# CONFIG
+# GLOBAL ANALYZER
 # ============================================================================
-HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
-MODEL_ID = "distilbert-base-uncased-finetuned-sst-2-english"
-HF_API_URL = "https://router.huggingface.co/hf-inference/models/distilbert-base-uncased-finetuned-sst-2-english"
+analyzer = None
 
 # ============================================================================
 # MODELS
@@ -52,10 +50,14 @@ class HealthResponse(BaseModel):
 # ============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global analyzer
     logger.info("=" * 60)
     logger.info("SERVER STARTUP")
-    logger.info(f"HF Token: {'SET ✅' if HF_API_TOKEN else 'NOT SET ❌'}")
-    logger.info(f"Model: {MODEL_ID}")
+    logger.info("Loading VADER sentiment analyzer...")
+
+    analyzer = SentimentIntensityAnalyzer()
+
+    logger.info("✅ VADER loaded successfully!")
     logger.info("✅ Server is ready to receive requests")
     logger.info("=" * 60)
     yield
@@ -66,7 +68,7 @@ async def lifespan(app: FastAPI):
 # ============================================================================
 app = FastAPI(
     title="Sentiment Analysis API",
-    description="Analyze sentiment using Hugging Face",
+    description="Analyze sentiment using VADER",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -93,15 +95,15 @@ def root():
         "name": "Sentiment Analysis API",
         "version": "1.0.0",
         "status": "running",
-        "model": MODEL_ID
+        "model": "VADER Sentiment Analyzer"
     }
 
 @app.get("/health", response_model=HealthResponse)
 def health_check():
     return HealthResponse(
         status="healthy",
-        model_loaded=True,
-        message="Server is running"
+        model_loaded=analyzer is not None,
+        message="Server is running with VADER sentiment analyzer"
     )
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -110,83 +112,73 @@ def analyze_sentiment(request: AnalyzeRequest):
 
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+
     if len(text) > 10000:
         raise HTTPException(status_code=400, detail="Text too long")
+
+    if analyzer is None:
+        raise HTTPException(status_code=503, detail="Analyzer not loaded")
 
     logger.info(f"Analyzing: {text[:50]}...")
 
     try:
         start_time = time.time()
 
-        headers = {
-            "Authorization": f"Bearer {HF_API_TOKEN}",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.post(
-            HF_API_URL,
-            headers=headers,
-            json={"inputs": text},
-            timeout=30
-        )
+        # Run VADER sentiment analysis
+        scores = analyzer.polarity_scores(text)
 
         inference_time = time.time() - start_time
-        logger.info(f"HF API status: {response.status_code}")
-        logger.info(f"HF API response: {response.text[:300]}")
 
-        # Handle model loading
-        if response.status_code == 503:
-            error_data = response.json()
-            wait_time = error_data.get("estimated_time", 20)
-            raise HTTPException(
-                status_code=503,
-                detail=f"Model is loading. Please wait {int(wait_time)} seconds and try again."
-            )
+        # VADER returns:
+        # {
+        #   'neg': 0.0,
+        #   'neu': 0.295,
+        #   'pos': 0.705,
+        #   'compound': 0.8316
+        # }
+        # compound score: -1 (most negative) to +1 (most positive)
+        # >= 0.05 = POSITIVE
+        # <= -0.05 = NEGATIVE
+        # between = NEUTRAL (we map to NEGATIVE or POSITIVE)
 
-        if response.status_code == 401:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid HF token."
-            )
+        compound = scores['compound']
+        pos = scores['pos']
+        neg = scores['neg']
 
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=500,
-                detail=f"HF API error: {response.status_code} - {response.text}"
-            )
-
-        result = response.json()
-        logger.info(f"Result: {result}")
-
-        # Handle different response formats
-        # Format 1: [[{"label": "POSITIVE", "score": 0.99}]]
-        # Format 2: [{"label": "POSITIVE", "score": 0.99}]
-        if isinstance(result[0], list):
-            predictions = result[0]
+        if compound >= 0.05:
+            sentiment = "POSITIVE"
+            confidence = (compound + 1) / 2  # normalize to 0-1
+        elif compound <= -0.05:
+            sentiment = "NEGATIVE"
+            confidence = (-compound + 1) / 2  # normalize to 0-1
         else:
-            predictions = result
+            # Neutral - pick whichever is stronger
+            if pos >= neg:
+                sentiment = "POSITIVE"
+                confidence = 0.5 + (pos * 0.1)
+            else:
+                sentiment = "NEGATIVE"
+                confidence = 0.5 + (neg * 0.1)
 
-        best = max(predictions, key=lambda x: x["score"])
+        # Ensure confidence is between 0.5 and 1.0
+        confidence = min(max(confidence, 0.5), 1.0)
 
-        logger.info(f"✅ {best['label']} | {best['score']:.4f} | {inference_time*1000:.2f}ms")
+        logger.info(
+            f"✅ {sentiment} | "
+            f"confidence: {confidence:.4f} | "
+            f"compound: {compound:.4f} | "
+            f"{inference_time*1000:.2f}ms"
+        )
 
         return AnalyzeResponse(
             text=text,
-            sentiment=best["label"],
-            confidence=best["score"],
+            sentiment=sentiment,
+            confidence=round(confidence, 4),
             inference_time_ms=round(inference_time * 1000, 2)
         )
 
     except HTTPException:
         raise
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Connection error: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Cannot connect to Hugging Face API. Please try again."
-        )
-    except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail="Request timed out.")
     except Exception as e:
         logger.error(f"❌ Error: {str(e)}")
         raise HTTPException(
