@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 MODEL_ID = "distilbert-base-uncased-finetuned-sst-2-english"
-HF_API_URL = "https://router.huggingface.co/hf-inference/models/distilbert-base-uncased-finetuned-sst-2-english/v1/text-classification"
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/distilbert-base-uncased-finetuned-sst-2-english"
 
 # ============================================================================
 # MODELS
