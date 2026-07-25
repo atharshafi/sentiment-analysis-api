@@ -1,6 +1,6 @@
 """
 Sentiment Analysis FastAPI Server
-Uses Hugging Face Inference API with synchronous requests
+Uses Hugging Face Router API (new endpoint - works on Render free tier)
 """
 
 import logging
@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # CONFIG
 # ============================================================================
-HF_API_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
+# New router URL - works on Render free tier!
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/distilbert-base-uncased-finetuned-sst-2-english/v1/text-classification"
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 
 # ============================================================================
@@ -35,19 +36,16 @@ class AnalyzeRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=10000)
     max_length: Optional[int] = Field(512)
 
-
 class AnalyzeResponse(BaseModel):
     text: str
     sentiment: str
     confidence: float
     inference_time_ms: float
 
-
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     message: str
-
 
 # ============================================================================
 # LIFESPAN
@@ -56,32 +54,30 @@ class HealthResponse(BaseModel):
 async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("SERVER STARTUP")
-    logger.info(f"HF Token configured: {'YES' if HF_API_TOKEN else 'NO'}")
-    logger.info("Testing connection to Hugging Face API...")
+    logger.info(f"HF Token: {'SET ✅' if HF_API_TOKEN else 'NOT SET ❌'}")
+    logger.info(f"API URL: {HF_API_URL}")
 
+    # Test connection to router (not api-inference!)
     try:
-        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
-        response = requests.get(
-            "https://huggingface.co",
-            headers=headers,
+        test_response = requests.get(
+            "https://router.huggingface.co",
             timeout=10
         )
-        logger.info(f"✅ HF connection test: {response.status_code}")
+        logger.info(f"✅ Router connection test: {test_response.status_code}")
     except Exception as e:
-        logger.warning(f"⚠️ HF connection test failed: {e}")
+        logger.warning(f"⚠️ Router connection test failed: {e}")
 
     logger.info("✅ Server is ready to receive requests")
     logger.info("=" * 60)
     yield
     logger.info("Server shutting down...")
 
-
 # ============================================================================
 # APP
 # ============================================================================
 app = FastAPI(
     title="Sentiment Analysis API",
-    description="Analyze sentiment using Hugging Face Inference API",
+    description="Analyze sentiment using Hugging Face Router API",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -99,7 +95,6 @@ app.add_middleware(
 )
 logger.info("✅ CORS configured")
 
-
 # ============================================================================
 # ROUTES
 # ============================================================================
@@ -108,86 +103,84 @@ def root():
     return {
         "name": "Sentiment Analysis API",
         "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "health": "/health",
-            "analyze": "/analyze (POST)",
-            "docs": "/docs"
-        }
+        "status": "running"
     }
-
 
 @app.get("/health", response_model=HealthResponse)
 def health_check():
     return HealthResponse(
         status="healthy",
         model_loaded=True,
-        message="Server is running and connected to Hugging Face API"
+        message="Server is running and connected to Hugging Face Router API"
     )
-
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze_sentiment(request: AnalyzeRequest):
-    # Validate
     text = request.text.strip()
 
     if not text:
-        raise HTTPException(
-            status_code=400,
-            detail="Text cannot be empty or whitespace only"
-        )
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
 
     if len(text) > 10000:
-        raise HTTPException(
-            status_code=400,
-            detail="Text exceeds maximum length of 10,000 characters"
-        )
+        raise HTTPException(status_code=400, detail="Text too long")
 
     logger.info(f"Analyzing: {text[:50]}...")
 
     try:
         start_time = time.time()
 
-        # Build headers
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {HF_API_TOKEN}"
         }
-        if HF_API_TOKEN:
-            headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
 
-        # Call HF API using synchronous requests
+        # New router API format
+        payload = {"inputs": text}
+
         response = requests.post(
             HF_API_URL,
             headers=headers,
-            json={"inputs": text},
+            json=payload,
             timeout=30
         )
 
         inference_time = time.time() - start_time
 
-        logger.info(f"HF API status: {response.status_code}")
+        logger.info(f"Router API status: {response.status_code}")
+        logger.info(f"Router API response: {response.text[:200]}")
 
-        # Handle 503 (model loading)
         if response.status_code == 503:
             raise HTTPException(
                 status_code=503,
-                detail="Model is warming up. Please try again in 20 seconds."
+                detail="Model warming up. Try again in 20 seconds."
             )
 
-        # Handle errors
+        if response.status_code == 401:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid HF token. Check your HF_API_TOKEN."
+            )
+
         if response.status_code != 200:
-            logger.error(f"HF API error: {response.text}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Hugging Face API error: {response.status_code}"
+                detail=f"HF Router API error: {response.status_code} - {response.text}"
             )
 
         # Parse response
-        # HF returns: [[{"label": "POSITIVE", "score": 0.9987}, ...]]
         result = response.json()
-        logger.info(f"HF API response: {result}")
+        logger.info(f"Parsed result: {result}")
 
-        predictions = result[0]
+        # Router returns: [{"label": "POSITIVE", "score": 0.9987}, ...]
+        # OR: [[{"label": "POSITIVE", "score": 0.9987}, ...]]
+        if isinstance(result, list):
+            if isinstance(result[0], list):
+                predictions = result[0]
+            else:
+                predictions = result
+        else:
+            predictions = [result]
+
         best = max(predictions, key=lambda x: x["score"])
 
         logger.info(
@@ -209,14 +202,11 @@ def analyze_sentiment(request: AnalyzeRequest):
         logger.error(f"Connection error: {e}")
         raise HTTPException(
             status_code=503,
-            detail="Cannot connect to Hugging Face API. Please try again."
+            detail="Cannot connect to HF Router. Please try again."
         )
     except requests.exceptions.Timeout:
         logger.error("Request timed out")
-        raise HTTPException(
-            status_code=504,
-            detail="Request timed out. Please try again."
-        )
+        raise HTTPException(status_code=504, detail="Request timed out.")
     except Exception as e:
         logger.error(f"❌ Error: {str(e)}")
         raise HTTPException(
@@ -224,16 +214,9 @@ def analyze_sentiment(request: AnalyzeRequest):
             detail=f"Analysis failed: {str(e)}"
         )
 
-
 # ============================================================================
 # MAIN
 # ============================================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
